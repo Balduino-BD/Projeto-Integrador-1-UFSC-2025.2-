@@ -1,4 +1,5 @@
-![Dashboard RainMaker](img/rainmaker_dashboard.png)
+<img width="375" height="832" alt="image" src="https://github.com/user-attachments/assets/5ccf7290-bb86-45cf-8ffe-2faa9096b57a" />
+
 
 ![Diagrama de Ligações](img/wiring_diag.png)
 
