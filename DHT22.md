@@ -5,7 +5,7 @@ O sensor DHT22 é utilizado para medir temperatura e umidade relativa do ar atra
 <img width="499" height="354" alt="image" src="https://github.com/user-attachments/assets/6fd6fc1a-1098-471d-b392-03a16d050f2f" />
 
 
-# Dados Técnicos do Sensor DHT11
+# Dados Técnicos do Sensor DHT22
 
 | Característica        | Descrição                              |
 |-----------------------|----------------------------------------|
