@@ -1,0 +1,79 @@
+![Dashboard RainMaker](img/rainmaker_dashboard.png)
+
+![Diagrama de Ligações](img/wiring_diag.png)
+
+# Arquitetura do Sistema
+
+## Visão geral
+O sistema integra **sensoriamento ambiental**, **exibição local** e **controle remoto** via **ESP RainMaker**, com lógica de alarme baseada no **MQ‑2**.
+
+```
++---------------------------+
+|           App             |
+| ESP RainMaker (Cloud/App) |
+|  - Cards: Temp/Umid/Press |
+|  - Card MQ2: Nivel,Estado |
+|  - Card Alarme: Power     |
+|  - Card Lâmpada: Power    |
++------------^--------------+
+             |
+             | MQTT/HTTPS (RMaker)
+             v
++---------------------------+
+|           ESP32           |
+|  Tarefas:                 |
+|  - Sensores (DHT,BMP180)  |
+|  - MQ-2 (nivel/estado)    |
+|  - LCD 16x2 (I²C)         |
+|  - Lógica Alarme          |
+|  - RMaker (provision/pub) |
++---^-----^--------^-----^--+
+    |     |        |     |
+    |     |        |     +--> GPIO23 (Lâmpada/SSR)
+    |     |        +--------> GPIO33 (Alarme)
+    |     +-----------------> I²C LCD 0x27
+    +-----------------------> I²C BMP180 0x77
+              +-------------> DHT22 GPIO4
+              +-------------> MQ-2 AO -> GPIO34
+```
+
+## Dispositivos/Parâmetros (RainMaker)
+- **Temperatura** (`esp.device.temperature-sensor`) → `Temperatura` (°C, R)
+- **Umidade** (`esp.device.humidity-sensor`) → `Umidade` (%, R)
+- **Pressão** (`esp.device.pressure-sensor`) → `Pressão` (hPa, R)
+- **MQ2** (`esp.device.sensor`):
+  - `Nivel` (%) (R)
+  - `Estado` (`OK|ATENÇÃO|ALERTA`) (R)
+  - `AlarmActive` (bool, R)
+- **Alarme** (`esp.device.switch`):
+  - `Power` (bool, R/W) — um clique
+  - `Estado` (string, R) — detalhe
+  - `AlarmActive` (bool, R) — detalhe
+- **Lâmpada** (`esp.device.switch`) → `Power` (bool, R/W) — um clique
+
+## Lógica do MQ‑2 e Alarme
+- Converte AO→tensão→**Rs**→**ratio**≈`Rs/R0` e calcula **nível (%)** relativo ao ar limpo.
+- Histerese:
+  - `OK → ATENÇÃO`: `nivel >= warn_on` (padrão 20%)
+  - `ATENÇÃO → ALERTA`: `nivel >= alert_on` (padrão 40%)
+  - `ALERTA → ATENÇÃO`: `nivel < alert_off` (30%)
+  - `ATENÇÃO → OK`: `nivel < warn_off` (15%)
+- **AlarmActive** = `true` quando **Estado = ALERTA`.
+- Saída **GPIO33** (alarme) = `Power` (do card Alarme) **E** `AlarmActive`.
+
+## Estados no LCD
+- Linha 1: `T:xx.x°C  U:yy.y%`
+- Linha 2: `P:zzzz.z hPa` ou mensagens de erro (`DHT22 ERRO`, `BMP180 ERRO`).
+
+## Particionamento e Provisionamento
+- **Partition Scheme**: `RainMaker 4MB No OTA` (inclui `fctry` usado pelo RainMaker).
+- **Provisionamento**: **SoftAP**, SSID `PROV_xxxxxx`, senha/POP `abcd1234`.
+
+## Telemetria e *Throttling*
+- Publicação com limites mínimos (10s) e *epsilon* por variável para economizar quota MQTT.
+- Publicações de flags (AlarmActive/Estado) por **mudança de estado**.
+
+## Segurança e Boas Práticas
+- Não exponha a senha do Wi‑Fi no repositório.
+- Gere um novo POP/senha para produção.
+- Considere watchdogs e *brown‑out detection* ativos.
