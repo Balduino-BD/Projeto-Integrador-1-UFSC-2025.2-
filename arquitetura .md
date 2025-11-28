@@ -2,8 +2,8 @@
 <img width="375" height="832" alt="image" src="https://github.com/user-attachments/assets/5ccf7290-bb86-45cf-8ffe-2faa9096b57a" />
 
 
-![Diagrama de Ligações](<img width="1092" height="750" alt="image" src="https://github.com/user-attachments/assets/b109b0a8-4bc8-4a51-bd2a-c52fd2662deb" />
-)
+[Diagrama de Ligações]<img width="1092" height="750" alt="image" src="https://github.com/user-attachments/assets/d78f6256-3b43-4bd0-b6b3-3acbe60ed424" />
+
 
 # Arquitetura do Sistema
 
