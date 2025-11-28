@@ -1,13 +1,18 @@
+// === Abaixo temos um codigo exemplo, para calibrar o sensor MQ-2, por um periodo de 6 minutos, nesta codições o ar precisa estar limpo===
+
+
 #include <Arduino.h>
 #include <nvs_flash.h>
 #include <Preferences.h>
 
-// ==== pinos e constantes iguais ao teu projeto ====
+// ==== pinos usados no Esp-WROOM-32D ====
+
+  
 #define MQ2_ADC_PIN   34
 #define MQ2_SAMPLES   32
 #define ADC_MAX       4095.0f
 #define ADC_REF_V     3.3f
-#define AO_DIV_FACTOR 2.0f   // teu divisor A0 para 3V3 do ESP (x2)
+#define AO_DIV_FACTOR 2.0f  
 #define MQ2_VC_MOD_V  5.0f
 #define MQ2_RL_KOHM   5.0f
 #define RS_R0_CLEAN_AIR 9.8f
@@ -43,8 +48,8 @@ void setup(){
 
   Serial.println(">> Certifique-se de estar em AR LIMPO.");
   Serial.println(">> Aguardando estabilizacao (~6 minutos)...");
-  const uint32_t T_MS = 6UL * 60UL * 1000UL;   // 6 minutos
-  const uint32_t PRINT_EVERY = 10000UL;        // log a cada 10 s
+  const uint32_t T_MS = 6UL * 60UL * 1000UL;   
+  const uint32_t PRINT_EVERY = 10000UL;        
   uint32_t t0 = millis(), t_last = t0;
 
   double accRs = 0.0; uint32_t n = 0;
