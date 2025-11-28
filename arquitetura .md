@@ -4,6 +4,8 @@
 
 [Diagrama de Ligações]<img width="1092" height="750" alt="image" src="https://github.com/user-attachments/assets/d78f6256-3b43-4bd0-b6b3-3acbe60ed424" />
 
+<img width="1556" height="828" alt="image" src="https://github.com/user-attachments/assets/a6017830-9706-4a5e-bfdf-8db40c2c92ce" />
+
 
 # Arquitetura do Sistema
 
