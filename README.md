@@ -1,7 +1,8 @@
 # Projeto-Integrador-1-UFSC-2025.2-
 
 Sistema Inteligente para Automação e Monitoramento de Condições Ambientais em Residências
-DESCRIÇÂO
+
+# DESCRIÇÂO
 
 O projeto propõe um Sistema Inteligente para Automação e Monitoramento de Condições Ambientais em Residências, capaz de coletar, exibir e reagir a variáveis de ambiente em tempo real. O núcleo é um ESP32 conectado a sensores de temperatura/umidade (DHT22), pressão atmosférica (BMP180 ou equivalente) e gás inflamável/fumaça (MQ-2). As leituras são apresentadas localmente em um display LCD/OLED e remotamente no aplicativo ESP RainMaker, permitindo acompanhamento contínuo e registro simplificado.
 
