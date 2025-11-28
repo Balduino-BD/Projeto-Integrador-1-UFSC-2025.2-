@@ -42,20 +42,20 @@ O sensor DHT22 é utilizado para medir temperatura e umidade relativa do ar atra
 
 ## Exemplo de Código
 
-Segue um exemplo de código para leitura de dados do DHT11 usando Arduino:
+Segue um exemplo de código para leitura de dados do DHT22 usando Arduino:
 
 ```cpp
 #include <DHT.h> // Biblioteca Necessária
 
 // Definir o pino do sensor e o tipo
 #define DHTPIN 4 // Pino de dados conectado ao pino digital 4
-#define DHTTYPE DHT11 // Definir o modelo do sensor (DHT22)
+#define DHTTYPE DHT22 // Definir o modelo do sensor (DHT22)
 
 DHT dht(DHTPIN, DHTTYPE);
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("Iniciando leitura do DHT11");
+  Serial.println("Iniciando leitura do DHT22");
   dht.begin();
   
   // Aguardar estabilização
@@ -117,7 +117,7 @@ void loop() {
 - Teste de 8 segundos total de 4 leituras
 
 ```
-Iniciando leitura do DHT11
+Iniciando leitura do DHT22
 Temperatura: 25.60 °C
 Umidade: 59.00 %
 Sensação Térmica: 26.18 °C
