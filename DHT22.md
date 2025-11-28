@@ -1,8 +1,9 @@
-# Sensor DHT11
+# Sensor DHT22
 
-O sensor DHT11 é utilizado para medir temperatura e umidade relativa do ar através de comunicação digital.
+O sensor DHT22 é utilizado para medir temperatura e umidade relativa do ar através de comunicação digital.
 
-<img src="DHT11.jpg" alt="Sensor DHT11" width="300">
+<img width="499" height="354" alt="image" src="https://github.com/user-attachments/assets/6fd6fc1a-1098-471d-b392-03a16d050f2f" />
+
 
 # Dados Técnicos do Sensor DHT11
 
@@ -18,7 +19,7 @@ O sensor DHT11 é utilizado para medir temperatura e umidade relativa do ar atra
 | Tempo de Resposta     | 2 segundos                            |
 | Interface             | 1-Wire (protocolo proprietário)       |
 
-## Pinagem do DHT11
+## Pinagem do DHT22
 
 | Pino | Função          | Descrição                     |
 |------|-----------------|-------------------------------|
@@ -28,7 +29,7 @@ O sensor DHT11 é utilizado para medir temperatura e umidade relativa do ar atra
 | 4    | GND             | Terra (Ground)               |
 
 ## Componentes
-- Módulo sensor DHT11
+- Módulo sensor DHT22
 - Resistor pull-up 5kΩ-10kΩ (opcional, muitos módulos já incluem)
 - Capacitor de desacoplamento 100nF (opcional)
 
@@ -48,7 +49,7 @@ Segue um exemplo de código para leitura de dados do DHT11 usando Arduino:
 
 // Definir o pino do sensor e o tipo
 #define DHTPIN 4 // Pino de dados conectado ao pino digital 4
-#define DHTTYPE DHT11 // Definir o modelo do sensor (DHT11)
+#define DHTTYPE DHT11 // Definir o modelo do sensor (DHT22)
 
 DHT dht(DHTPIN, DHTTYPE);
 
