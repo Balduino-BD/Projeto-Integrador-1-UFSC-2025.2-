@@ -27,10 +27,10 @@ Ferramentas → selecione **ESP32 Dev Module** (ou sua variante) e ajuste:
 - Clique **Upload**.
 - Monitore a **Serial** (115200) para checar mensagens de boot e sensores.
 
-## 5) Provisionamento (SoftAP)
+## 5) Provisionamento (SoftAP ou BLE)
 O firmware já usa **SoftAP** para economizar Flash.
 - Ao iniciar, o ESP32 cria o AP `PROV_xxxxxx` (gera a partir do MAC).
-- **Senha/POP**: `abcd1234`.
+- **Senha/POP**: `abcd1234`.(Obs: Temporário)
 - No app **ESP RainMaker**, escolha **Provision via SoftAP**, conecte-se ao SSID e conclua.
 
 > Se preferir BLE, altere no código a chamada `WiFiProv.beginProvision(...)` para `NETWORK_PROV_SCHEME_BLE` e regrave o firmware (o binário pode aumentar).
@@ -58,5 +58,5 @@ O firmware já usa **SoftAP** para economizar Flash.
 - [ ] Partição `RainMaker 4MB No OTA` selecionada.
 - [ ] Bibliotecas instaladas.
 - [ ] Firmware gravado sem erros.
-- [ ] SoftAP provisionado (`abcd1234`).
+- [ ] SoftAP provisionado (`abcd1234`). (Obs: Temporário)
 - [ ] Cartões operacionais no app.
