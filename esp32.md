@@ -229,8 +229,3 @@ https://dl.espressif.com/dl/package_esp32_index.json
    - Otimizar frequência de leituras
 
 ## Links Úteis
-
-- **[Documentação Oficial ESP32](https://docs.espressif.com/projects/esp32/en/latest/)**
-- **[ESP32 Arduino Core](https://github.com/espressif/arduino-esp32)**
-- **[Exemplos de Código](https://github.com/espressif/arduino-esp32/tree/master/libraries)**
-- **[ESP32 Pinout Reference](https://randomnerdtutorials.com/esp32-pinout-reference-gpios/)**
