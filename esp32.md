@@ -32,17 +32,17 @@ O ESP32 é um microcontrolador avançado amplamente utilizado em projetos de IoT
 | EN   | Enable          | Reset do microcontrolador             |
 
 ### Pinos GPIO Utilizados no Projeto
-| Pino GPIO | Função no Projeto    | Sensor/Dispositivo        | Tipo      |
-|-----------|----------------------|---------------------------|-----------|
-| 4         | Dados DHT11         | DHT11                     | Digital   |
-| 35        | Leitura Solo        | FC-28 (Analógico)         | ADC       |
-| 34        | Intensidade Chuva   | FC-37 (Analógico)         | ADC       |
-| 21        | I2C SDA             | BMP280                    | I2C       |
-| 22        | I2C SCL             | BMP280                    | I2C       |
-| 14        | Sensor Nível 1      | Nível Baixo Tanque        | Digital   |
-| 27        | Sensor Nível 2      | Nível Alto Tanque         | Digital   |
-| 26        | Bomba Irrigação     | Relé Bomba                | Digital   |
-| 25        | Válvula Solenoide   | Relé Válvula              | Digital   |
+| Pino GPIO | Função no Projeto                         | Sensor/Dispositivo        | Tipo      |
+|-----------|----------------------                     |---------------------------|-----------|
+| 4         | Dados DHT22                               | DHT22                     | Digital   |
+| 35        | Leitura Solo                              | FC-28 (Analógico)         | ADC       |
+| 34        | Intensidade Chuva                         | FC-37 (Analógico)         | ADC       |
+| 21        | I2C SDA                                   | BMP180                    | I2C       |
+| 22        | I2C SCL                                   | BMP180                    | I2C       |
+| 23        | Manipulação/Dispositivo remotamnete       | Rele de estado solido     | Digital   |
+| 21        | I2C SDA                                   | Display de CristalLiquido | I2C       |
+| 22        |I2C SCL                                    | Display de CristalLiquido | I2C       |
+| 33        | Buzzer                                    | Emissão de ALerta sonoro  | Digital   |
 
 ## Componentes Necessários
 - Microcontrolador ESP32 DevKit
@@ -60,9 +60,6 @@ O ESP32 é um microcontrolador avançado amplamente utilizado em projetos de IoT
 - **PWM**: Qualquer GPIO pode gerar PWM por software.
 
 ## Arquivos de Implementação
-
-### 1. Sistema Completo com IA - `esp32IA.cpp`
-**[Código Completo](esp32IA.cpp)**
 
 **Sensores Integrados:**
 - DHT11: Temperatura e umidade do ar
