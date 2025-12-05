@@ -64,30 +64,12 @@ O ESP32 é um microcontrolador avançado amplamente utilizado em projetos de IoT
 ### 1. Sistema Completo com IA - `esp32IA.cpp`
 **[Código Completo](esp32IA.cpp)**
 
-Sistema completo de irrigação inteligente com as seguintes funcionalidades:
-
-**Recursos:**
-- Algoritmo KNN para decisões de irrigação
-- Integração com ThingsBoard (IoT)
-- Controle automático de tanque de água
-- Múltiplos modos de operação (Auto/Manual/Personalizado)
-- Comandos RPC via Wi-Fi
-
 **Sensores Integrados:**
 - DHT11: Temperatura e umidade do ar
-- FC-28: Umidade do solo
-- FC-37: Detecção de chuva
+- MQ-2: Controle de Gás
+- Buzzer: Para Emitir alertas
 - BMP280: Pressão atmosférica
-- Sensores de nível do tanque
-
-### 2. Sistema para Manjericão - `esp32_manjericao.cpp`
-Sistema otimizado especificamente para cultivo de manjericão:
-
-**Características:**
-- Regras baseadas nas necessidades do manjericão
-- Umidade do solo ideal: 60-85%
-- Temperatura ideal: 18-30°C
-- Controle simplificado sem IA
+- Relé de estado Sólido 
 
 ## Exemplo de Código Básico
 
@@ -210,17 +192,6 @@ https://dl.espressif.com/dl/package_esp32_index.json
 - **Flash Size**: 4MB
 - **Port**: Selecionar porta COM correta
 
-## Características de Desempenho
-
-### Consumo de Energia
-| Modo              | Consumo Típico | Duração da Bateria* |
-|-------------------|----------------|---------------------|
-| Ativo (Wi-Fi On)  | 240mA         | ~4 horas           |
-| Modem Sleep       | 20mA          | ~50 horas          |
-| Light Sleep       | 0.8mA         | ~52 dias           |
-| Deep Sleep        | 10μA          | ~11 anos           |
-
-*Com bateria de 1000mAh
 
 ### Conectividade Wi-Fi
 - **Padrões**: 802.11 b/g/n
@@ -229,11 +200,10 @@ https://dl.espressif.com/dl/package_esp32_index.json
 - **Modos**: Station, Access Point, Station+AP
 - **Segurança**: WPA/WPA2/WPA3
 
-## Aplicações no Sistema de Irrigação
+## Aplicações no Sistema inteligente
 
 - **Controle Central**: Gerencia todos os sensores e atuadores
 - **Conectividade IoT**: Comunicação com ThingsBoard via Wi-Fi
-- **Processamento Local**: Executa algoritmos de IA localmente
 - **Controle Remoto**: Recebe comandos via internet
 - **Monitoramento**: Coleta e transmite dados em tempo real
 - **Economia de Energia**: Modos de baixo consumo quando inativo
