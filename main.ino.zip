@@ -1,1 +1,906 @@
+/*
+Engenharia de Computação
+Projeto Integrador 1
+Balduino José Da Silva
+*/
+
+
+
+// ==== ESP32 + ESP RainMaker + LCD 16x2 (I2C 0x27) + DHT22 + BMP180 + MQ-2 ====
+//
+// Funcionalidades principais:
+// - Leitura de temperatura/umidade (DHT22), pressão atmosférica (BMP180) e gás (MQ-2).
+// - Exibição no LCD 16x2 alternando entre:
+//      * Tela 1: Ambiente -> Temperatura, Umidade, Pressão.
+//      * Tela 2: MQ-2 -> Estado (OK / ATENCAO / ALERTA), delta% e tensão vAO.
+// - LEDs de estado do MQ-2 (apenas um aceso por vez):
+//      * LED_NORMAL  (VERDE)  -> OK
+//      * LED_ATENCAO (AMARELO)-> ATENCAO
+//      * LED_ALERTA  (VERM.)  -> ALERTA
+// - Alarme físico (ALARM_GPIO, ex: buzzer ou relé) acionado:
+//      * Automaticamente quando MQ-2 entra em ALERTA (se g_alarmEnable = true).
+//      * Manualmente via RainMaker (g_alarmForce).
+// - Lâmpada (LAMP_GPIO, SSR) controlada via RainMaker.
+// - Integração com ESP RainMaker:
+//      * Dispositivos (Devices):
+//          - Temperatura (sensor).
+//          - Umidade (sensor).
+//          - Pressao (sensor).
+//          - MQ2 (switch com parâmetros AlarmEnable, AlarmActive, Estado).
+//          - Alarme (lightbulb) -> controla GPIO33.
+//          - Lampada (lightbulb) -> controla GPIO23.
+//      * "Espelhos" para Alexa (todos esp.device.temperature-sensor):
+//          - Umidade Alexa   -> recebe o valor da umidade (%).
+//          - Pressao Alexa   -> recebe o valor da pressão (hPa).
+//          - MQ2 Alexa       -> recebe o delta% de MQ-2.
+//        Assim, a Alexa entende todos como "temperature-sensor".
+//
+// - Provisionamento BLE (POP = "balduino2025") para configurar Wi-Fi no app RainMaker.
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <Adafruit_BMP085.h>   // Biblioteca para BMP180/BMP085
+#include <DHT.h>
+#include <RMaker.h>
+#include <WiFiProv.h>
+#include "nvs_flash.h"
+#include "esp_mac.h"
+#include <Preferences.h>
+
+// Algumas versões do RainMaker não têm a macro de umidade definida.
+// Aqui garantimos que exista um identificador para o parâmetro de umidade.
+
+
+#ifndef ESP_RMAKER_PARAM_HUMIDITY
+#define ESP_RMAKER_PARAM_HUMIDITY "esp.param.humidity"
+#endif
+
+// ---------------- PINAGEM / HARDWARE ----------------
+// Pinos I2C (ESP32 padrão: SDA=21, SCL=22)
+
+#define SDA_PIN   21
+#define SCL_PIN   22
+
+// Endereço e dimensões do LCD I2C
+
+#define LCD_ADDR  0x27
+#define LCD_COLS  16
+#define LCD_ROWS  2
+
+// Sensor DHT22 (Temperatura / Umidade)
+
+#define DHTPIN    4
+#define DHTTYPE   DHT22
+
+// MQ-2 no pino analógico 34 (ADC1_CH6) com divisor de tensão 5V -> 3,3V
+
+#define MQ2_ADC_PIN        34
+#define MQ2_SAMPLES        32      // Número de amostras para média
+#define ADC_MAX            4095.0f // Resolução de 12 bits (0–4095)
+#define ADC_REF_V          3.3f    // Referência do ADC
+#define AO_DIV_FACTOR      2.0f    // Fator do divisor de tensão (5V -> ~2.5V/3.3V)
+#define MQ2_VC_MOD_V       5.0f    // Tensão de alimentação do módulo MQ-2
+#define MQ2_RL_KOHM        5.0f    // Resistor de carga (RL) do módulo em kOhm
+#define RS_R0_CLEAN_AIR    9.8f    // Relação Rs/R0 típica em ar limpo
+
+// LEDs de estado (UM aceso por vez)
+
+#define LED_NORMAL   13    // LED verde  -> estado OK
+#define LED_ATENCAO  26    // LED amarelo-> estado ATENCAO
+#define LED_ALERTA   33    // LED vermelho-> estado ALERTA
+const bool LED_ACTIVE_HIGH = true;  // true = LED acende com nível HIGH no pino
+
+// Botão local para habilitar/desabilitar alarme automático
+// (pode compartilhar o mesmo pino do LED_ALERTA via multiplexação)
+
+#define BTN_ALARM_PIN               LED_ALERTA
+#define BTN_SHARED_WITH_ALERT_LED   1   // 1 = botão/LED no mesmo pino; 0 = pino separado
+
+// Saídas (atuadores)
+
+#define ALARM_GPIO        33  // Buzzer ou relé de alarme
+#define LAMP_GPIO         23  // SSR para lâmpada
+const bool ALARM_ACTIVE_HIGH = true;  // true = relé/buzzer liga com HIGH
+const bool LAMP_ACTIVE_HIGH  = true;  // true = SSR liga com HIGH
+
+// ---------------- TIMINGS / PUBLICAÇÃO ----------------
+
+#define UI_PERIOD_MS     3000UL      // período para alternar página no LCD (3s)
+#define PUB_MIN_MS_SLOW  10000UL     // mínimo entre publicações dos sensores (10s)
+
+// Variações mínimas para decidir se vale a pena publicar (histerese de envio)
+
+#define TEMP_EPS   0.2f   // °C
+#define HUM_EPS    1.0f   // %
+#define PRESS_EPS  0.5f   // hPa
+
+// ---------------- MQ-2: LIMIARES, R0, HISTERSE ----------------
+// Estrutura com limiares de histerese para transição de estados
+// (warn = atenção; alert = alerta)
+
+struct Thresh { 
+  float warn_on  = 15;  // delta% para subir de NORMAL -> ATENCAO
+  float warn_off = 10;  // delta% para descer de ATENCAO -> NORMAL
+  float alert_on = 40;  // delta% para subir de ATENCAO/NORMAL -> ALERTA
+  float alert_off= 30;  // delta% para descer de ALERTA -> ATENCAO
+} th;
+
+// Estados possíveis do MQ-2
+
+enum MQ2State : uint8_t { 
+  ST_NORMAL   = 0, 
+  ST_ATENCAO  = 1, 
+  ST_ALERTA   = 2 
+};
+
+// Opção de usar R0 fixo (obtido de calibração prévia)
+
+#define USE_FIXED_R0   1
+#define FIXED_R0_KOHM  1.471f   // exemplo obtido do seu calibrador (~14.42k / 9.8)
+
+// ---------------- GLOBAIS ----------------
+
+LiquidCrystal_I2C lcd(LCD_ADDR, LCD_COLS, LCD_ROWS);   // LCD I2C
+Adafruit_BMP085 bmp; bool hasBMP=false;                // BMP180 / BMP085
+DHT dht(DHTPIN, DHTTYPE);                              // DHT22
+
+Preferences prefs;          // Para armazenar/leitura de R0 em NVS (se quiser)
+float MQ2_R0_kohm = NAN; 
+bool  MQ2_hasR0   = false;
+
+// Flags de alarme e LEDs
+
+bool g_alarmEnable = true;   // true = MQ2 em ALERTA pode acionar o relé
+bool g_alarmForce  = false;  // true = RainMaker ligou manualmente o alarme
+bool g_alarmTrigger= false;  // true = lógica automática quer alarme ligado
+
+bool g_ledN=false, g_ledA=false, g_ledL=false; // estados atuais dos LEDs
+
+char g_estado[16] = "OK";    // string para estado textual (OK / ATENCAO / ALERTA)
+
+// --- Objetos do RainMaker ---
+
+Node myNode;
+
+// Devices de sensores principais
+
+Device *devTemp   = nullptr;
+Device *devHum    = nullptr;
+Device *devPress  = nullptr;
+
+// Devices "espelho" para Alexa (todos temperature-sensor)
+
+Device *devHumAlexa   = nullptr;
+Device *devPressAlexa = nullptr;
+Device *devMQ2Alexa   = nullptr;
+
+// Devices MQ2 (estado) + atuadores (alarme e lâmpada)
+
+Device *devMQ2   = nullptr;
+Device *devAlarm = nullptr;
+Device *devLamp  = nullptr;
+
+// Parâmetros de sensores
+
+Param pTemp, pHum, pPress;
+
+// Parâmetros dos espelhos Alexa (todos Temperature)
+
+Param pHumAlexaTemp, pPressAlexaTemp, pMQ2AlexaTemp;
+
+// Parâmetros de MQ2 (enable/active/estado)
+
+Param pAlarmEnable, pAlarmActive, pEstadoStr;
+
+// Switches de Alarme e Lâmpada
+
+Param pAlarmSwitch, pLampSwitch;
+
+// --------- Estruturas de "throttle" para reduzir publicações repetidas ---------
+
+struct ThrottleF { 
+  float     last   = NAN;       // último valor publicado
+  uint32_t  t0     = 0;         // timestamp da última publicação
+  uint32_t  min_ms = 0;         // tempo mínimo entre pubs
+  float     eps    = 0.0f;      // mudança mínima para justificar nova pub
+
+  bool should(float v){
+    uint32_t now = millis(); 
+
+    // Publica se: nunca publicou, mudou mais que eps, ou tempo mínimo já passou
+
+    if (isnan(last) || fabs(v - last) > eps || (now - t0) >= min_ms){
+      last = v; 
+      t0   = now; 
+      return true;
+    }
+    return false;
+  } 
+};
+
+struct ThrottleB { 
+  int       last   = -1;       // último valor lógico (0 ou 1)
+  uint32_t  t0     = 0;        // timestamp da última publicação
+  uint32_t  min_ms = 0;        // tempo mínimo entre pubs
+
+  bool should(bool v){
+    uint32_t now = millis(); 
+    int iv = v ? 1 : 0; 
+    if (iv != last || (now - t0) >= min_ms){
+      last = iv; 
+      t0   = now; 
+      return true;
+    }
+    return false;
+  } 
+};
+
+// Limitadores de frequência para cada grandeza
+
+
+ThrottleF thrTemp {NAN,0,PUB_MIN_MS_SLOW,TEMP_EPS};
+ThrottleF thrHum  {NAN,0,PUB_MIN_MS_SLOW,HUM_EPS};
+ThrottleF thrPress{NAN,0,PUB_MIN_MS_SLOW,PRESS_EPS};
+
+// Throttle para MQ2 Alexa (delta %)
+
+ThrottleF thrMQ2A {NAN,0,PUB_MIN_MS_SLOW,0.5f};
+
+ThrottleB thrAlarmActive, thrAlarmEnableFlag;
+
+// ---------------- FUNÇÕES UTILITÁRIAS ----------------
+
+// Inicializa NVS com tratamento de erro (necessário para RainMaker e Preferences)
+
+static bool nvs_init_ok(){
+  esp_err_t err = nvs_flash_init();
+  if (err == ESP_ERR_NVS_NO_FREE_PAGES) {
+    nvs_flash_erase(); 
+    err = nvs_flash_init();
+  }
+  return (err == ESP_OK || err == ESP_ERR_NVS_NEW_VERSION_FOUND);
+}
+
+// Carrega R0 do MQ-2 (fixo ou via NVS)
+
+void MQ2_loadR0(){
+#if USE_FIXED_R0
+
+  // Usa R0 fixo, que foi encontrado no processo de calibração.
+
+  MQ2_R0_kohm = FIXED_R0_KOHM; 
+  MQ2_hasR0   = true;
+  Serial.printf("[MQ2] Usando R0 FIXO = %.3f kOhm\n", MQ2_R0_kohm);
+#else
+
+  // Exemplo se quiser pegar do NVS:
+
+  prefs.begin("mq2", true);
+  float r0 = prefs.getFloat("R0", NAN);
+  prefs.end();
+  if (!isnan(r0) && r0 > 0.01f && r0 < 10000.0f){
+    MQ2_R0_kohm = r0; 
+    MQ2_hasR0   = true; 
+    Serial.printf("[MQ2] R0 (NVS) = %.3f kOhm\n", r0);
+  } else {
+    MQ2_hasR0 = false; 
+    Serial.println("[MQ2] R0 NAO encontrado no NVS.");
+  }
+#endif
+}
+
+// Escreve em pinos "ativos em HIGH" (útil para LEDs)
+
+inline void pinWriteActive(int pin,bool on){
+  digitalWrite(pin, LED_ACTIVE_HIGH ? (on?HIGH:LOW) : (on?LOW:HIGH));
+}
+
+// Liga/Desliga alarme físico (buzzer/relé)
+
+inline void alarmWrite(bool on){
+  digitalWrite(ALARM_GPIO, ALARM_ACTIVE_HIGH ? (on?HIGH:LOW) : (on?LOW:HIGH));
+}
+
+// Liga/Desliga lâmpada (SSR)
+
+inline void lampWrite(bool on){
+  digitalWrite(LAMP_GPIO,  LAMP_ACTIVE_HIGH  ? (on?HIGH:LOW) : (on?LOW:HIGH));
+}
+
+// Liga exatamente um LED (verde, amarelo ou vermelho) conforme estado
+
+void setLeds(bool n,bool a,bool l){
+  pinWriteActive(LED_NORMAL,  n);
+  pinWriteActive(LED_ATENCAO, a);
+  pinWriteActive(LED_ALERTA,  l);
+  g_ledN = n; 
+  g_ledA = a; 
+  g_ledL = l;
+}
+
+// Atualiza a string de estado (OK / ATENCAO / ALERTA) e publica
+
+void setEstado(const char* s){
+  if (strcmp(g_estado,s)!=0){
+    strncpy(g_estado,s,sizeof(g_estado)-1);
+    g_estado[sizeof(g_estado)-1] = '\0';
+    pEstadoStr.updateAndReport(value((const char*)g_estado));
+  }
+}
+
+// Limpa uma linha do LCD (preenche com espaços)
+
+void lcdClearLine(uint8_t row){
+  lcd.setCursor(0,row); 
+  for(int i=0;i<LCD_COLS;i++) lcd.print(' ');
+}
+
+// Escreve duas linhas no LCD (com truncamento se exceder colunas)
+
+void lcdMsg(const String& l1, const String& l2=""){
+  lcdClearLine(0); 
+  lcd.setCursor(0,0); 
+  lcd.print(l1.substring(0,LCD_COLS));
+
+  lcdClearLine(1); 
+  lcd.setCursor(0,1); 
+  lcd.print(l2.substring(0,LCD_COLS));
+}
+
+// Leitura "crua" do botão de alarme, com multiplexação se for compartilhado com LED
+
+bool readAlarmButtonRaw(){
+#if BTN_SHARED_WITH_ALERT_LED
+
+  // Guarda estado atual do LED vermelho
+
+  bool keep = g_ledL;
+
+  // Troca o modo do pino para entrada com pull-up para ler o botão
+
+  pinMode(BTN_ALARM_PIN, INPUT_PULLUP);
+  delay(3);  // pequeno delay para estabilizar
+
+  int v = digitalRead(BTN_ALARM_PIN);
+
+  // Retorna o pino ao modo OUTPUT e restaura o LED
+
+  pinMode(LED_ALERTA, OUTPUT);                
+  pinWriteActive(LED_ALERTA, keep);
+
+  // Botão pressionado = GND, portanto LOW
+
+  return (v==LOW);
+#else
+  return digitalRead(BTN_ALARM_PIN)==LOW;
+#endif
+}
+
+// Debounce do botão (25 ms)
+
+bool debounceAlarmButton(){
+  static uint32_t st_ms=0; 
+  static bool last=false; 
+  static bool stable=false;
+
+  bool now = readAlarmButtonRaw(); 
+  uint32_t ms = millis();
+
+  if (now!=last){ 
+    last  = now; 
+    st_ms = ms; 
+  }
+
+  // Se passar 25ms estável, consideramos como mudança real
+
+  if (ms - st_ms >= 25){ 
+    if (stable!=now){ 
+      stable = now; 
+      if (stable) return true; 
+    } 
+  }
+  return false;
+}
+
+// Lógica do botão local: alterna g_alarmEnable e atualiza RainMaker
+
+void handleAlarmButton(){
+
+  if (debounceAlarmButton()){
+
+    // Alterna a permissão do alarme automático
+
+    g_alarmEnable = !g_alarmEnable;
+
+    // Publica mudança (se passar pelo throttle)
+
+    if (thrAlarmEnableFlag.should(g_alarmEnable))
+      pAlarmEnable.updateAndReport(value((bool)g_alarmEnable));
+
+    // Se desabilitar enquanto estava em ALERTA, recua para ATENCAO
+
+    if (!g_alarmEnable && g_ledL){
+      setLeds(false,true,false); // mantém alerta visual como ATENCAO
+      if (thrAlarmActive.should(false)) 
+        pAlarmActive.updateAndReport(value(false));
+    }
+  }
+}
+
+// -------- Funções auxiliares do MQ-2 --------
+
+// Lê 'samples' amostras do ADC e retorna a média
+
+static uint16_t readADCavg(int pin,int samples){
+  uint32_t acc=0; 
+  for(int i=0;i<samples;i++){ 
+    acc += analogRead(pin); 
+    delayMicroseconds(250); 
+  } 
+  return (uint16_t)(acc/samples);
+}
+
+// Converte valor cru do ADC na tensão vAO do módulo MQ-2
+
+static float MQ2_adcToModuleAO_V(uint16_t raw){
+  return ((raw/ADC_MAX)*ADC_REF_V)*AO_DIV_FACTOR;
+}
+
+// Calcula Rs (resistência do sensor) em kOhm, a partir de vout
+
+static float MQ2_calcRs_kohm(float vout){
+
+  // Garante que vout esteja em uma faixa válida
+
+  vout = constrain(vout, 0.01f, MQ2_VC_MOD_V-0.01f);
+
+  // Fórmula Rs = RL * (Vc - Vout)/Vout
+
+  return MQ2_RL_KOHM * (MQ2_VC_MOD_V - vout)/vout;
+}
+
+// Aplica histerese nos limiares do MQ-2 para suavizar mudanças de estado
+
+static MQ2State updateStateWithHysteresis(float d){
+  static MQ2State st = ST_NORMAL;
+  switch(st){
+    case ST_NORMAL:  
+      if (!isnan(d) && d >= th.alert_on)      st = ST_ALERTA; 
+      else if (!isnan(d) && d >= th.warn_on)  st = ST_ATENCAO; 
+      break;
+
+    case ST_ATENCAO: 
+      if (!isnan(d) && d >= th.alert_on)      st = ST_ALERTA; 
+      else if (isnan(d) || d < th.warn_off)   st = ST_NORMAL; 
+      break;
+
+    case ST_ALERTA:  
+      if (isnan(d) || d < th.alert_off)       st = ST_ATENCAO; 
+      break;
+  }
+  return st;
+}
+
+// Scanner I2C para diagnóstico (exibe endereços encontrados no Serial)
+
+void scanI2C() {
+  Serial.println("[I2C] Escaneando...");
+  byte count = 0;
+  for (byte addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      Serial.printf("  - 0x%02X\n", addr);
+      count++;
+    }
+  }
+  if (count == 0) Serial.println("  (nada encontrado)");
+}
+
+// ---------------- LEITURA DE SENSORES + LÓGICA + LCD + RAINMAKER ----------------
+
+void updateSensorsAndActuators(){
+
+  // --- DHT22: temperatura (°C) e umidade (%) ---
+
+  float t = dht.readTemperature();
+  float h = dht.readHumidity();
+
+  // --- BMP180: pressão em hPa ---
+
+  float p_hPa = NAN;
+  if (hasBMP){
+    float p_pa = bmp.readPressure(); // em Pascal
+    if (!isnan(p_pa) && p_pa>5000 && p_pa<120000) 
+      p_hPa = p_pa/100.0f;          // converte para hPa
+  }
+
+  // --- MQ-2: cálculo do delta% em relação ao ar limpo ---
+
+  uint16_t raw = readADCavg(MQ2_ADC_PIN, MQ2_SAMPLES);
+  float vAO    = MQ2_adcToModuleAO_V(raw);
+  float Rs_k   = MQ2_calcRs_kohm(vAO);
+
+  float ratio  = (!isnan(MQ2_R0_kohm) && MQ2_R0_kohm>0) ? (Rs_k/MQ2_R0_kohm) : NAN;
+
+  // delta% = variação percentual em relação à relação Rs/R0 no ar limpo
+
+  float delta  = (!isnan(ratio)) ? 100.0f*(RS_R0_CLEAN_AIR - ratio)/RS_R0_CLEAN_AIR : NAN;
+
+  // --- Alterna a página do LCD: AMBIENTE <-> MQ2 ---
+
+  static bool showMQ = false;
+  if (!showMQ) {
+    // -------- Página AMBIENTE --------
+
+    String l1, l2;
+    if (isnan(t) || isnan(h)) {
+      l1 = "DHT22 ERRO";
+    } else {
+
+      
+
+      l1 = String("T:") + String(t,1) + (char)223 + "C  U:" + String(h,1) + "%";
+
+      // Publica Temperatura no RainMaker (com throttle)
+
+      if (thrTemp.should(t)) 
+        pTemp.updateAndReport(value((float)t));
+
+      // Publica Umidade no RainMaker + "Umidade Alexa"
+
+      if (thrHum.should(h))  {
+        pHum.updateAndReport(value((float)h));
+        pHumAlexaTemp.updateAndReport(value((float)h));
+      }
+    }
+
+    if (isnan(p_hPa)) {
+      l2 = "BMP180 ERRO";
+    } else {
+
+     
+      l2 = String("P:") + String(p_hPa,1) + " hPa";
+
+      // Publica Pressao no RainMaker + "Pressao Alexa"
+
+      if (thrPress.should(p_hPa)) {
+        pPress.updateAndReport(value((float)p_hPa));
+        pPressAlexaTemp.updateAndReport(value((float)p_hPa));
+      }
+    }
+
+    lcdMsg(l1,l2);
+  } else {
+    // -------- Página MQ2/Estado --------
+
+    const char* stTxt = "OK";
+    if (!isnan(delta)) {
+      if (delta >= th.alert_on)      stTxt = "ALERTA";
+      else if (delta >= th.warn_on)  stTxt = "ATENCAO";
+    }
+    // Linha 1: estado textual
+
+    String l1 = String("MQ2 ") + stTxt;
+
+    // Linha 2: delta% e tensão vAO
+
+    String l2 = String("D=") + (isnan(delta) ? String("--.-") : String(delta,1))
+              + "% v=" + String(vAO,2) + "V";
+    lcdMsg(l1,l2);
+  }
+  showMQ = !showMQ; // inverte página para próxima chamada
+
+  // --- Publicação do delta% no "MQ2 Alexa" (espelho Alexa) ---
+
+  if (!isnan(delta) && thrMQ2A.should(delta)) {
+    pMQ2AlexaTemp.updateAndReport(value((float)delta));
+  }
+
+  // --- Atualiza estado do MQ-2 com histerese, LEDs e alarme automático ---
+
+  MQ2State st = updateStateWithHysteresis(delta);
+
+  // Lógica de disparo automático do alarme (somente se Enable = true)
+
+  g_alarmTrigger = (st==ST_ALERTA) && g_alarmEnable;
+
+  // LEDs: só um aceso dependendo do estado
+
+  switch (st) {
+    case ST_NORMAL:   setLeds(true,  false, false); break; // Verde
+    case ST_ATENCAO:  setLeds(false, true,  false); break; // Amarelo
+    case ST_ALERTA:   setLeds(false, false, true);  break; // Vermelho
+  }
+
+  // String de estado textual (usada também na UI do RainMaker)
+
+  if (st == ST_ALERTA) 
+    setEstado(g_alarmTrigger ? "ALERTA" : "ATENCAO");
+  else if (st == ST_ATENCAO) 
+    setEstado("ATENCAO");
+  else 
+    setEstado("OK");
+
+  // Publica flag de alarme ativo (AlarmActive) somente se mudar
+
+  if (thrAlarmActive.should(g_alarmTrigger))
+    pAlarmActive.updateAndReport(value((bool)g_alarmTrigger));
+
+  // Saída física do ALARME:
+  // Verdadeiro se: comando manual (g_alarmForce) OU automático (g_alarmTrigger)
+
+  alarmWrite(g_alarmForce || g_alarmTrigger);
+}
+
+// ---------------- SETUP ----------------
+
+void setup(){
+  Serial.begin(115200);
+  delay(200);
+  Serial.println("\n[BOOT] Iniciando...");
+
+  // Inicializa I2C e LCD
+
+  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.setClock(100000);
+  lcd.init(); 
+  lcd.backlight();
+  lcdMsg("Inicializando...","I2C scan");
+  scanI2C(); // mostra no Serial os endereços encontrados (ex: 0x27 e 0x77)
+
+  // Inicializa NVS (usado pelo RainMaker e opcionalmente para R0 do MQ2)
+
+  if(!nvs_init_ok()){ 
+    Serial.println("NVS FAIL"); 
+    lcdMsg("NVS FAIL","Reiniciando"); 
+    delay(700); 
+    ESP.restart(); 
+  }
+  MQ2_loadR0(); // carrega R0 (fixo ou NVS, conforme #define)
+
+  // Inicializa sensores
+
+  hasBMP = bmp.begin();   // BMP180 (endereço 0x77)
+  if (hasBMP) Serial.println("BMP180 OK.");
+  else        Serial.println("BMP180 ERRO.");
+
+  dht.begin();            // DHT22
+  analogReadResolution(12);                 // 12 bits
+  analogSetPinAttenuation(MQ2_ADC_PIN, ADC_11db); 
+
+  // Configuração dos GPIOs
+
+  pinMode(LED_NORMAL,  OUTPUT);
+  pinMode(LED_ATENCAO, OUTPUT);
+  pinMode(LED_ALERTA,  OUTPUT);
+  pinMode(ALARM_GPIO,  OUTPUT);
+  pinMode(LAMP_GPIO,   OUTPUT);
+
+  setLeds(true,false,false);  // inicia em OK (verde)
+  alarmWrite(false);          // alarme desligado
+  lampWrite(false);           // lâmpada desligada
+
+#if !BTN_SHARED_WITH_ALERT_LED
+
+  // Se o botão tiver pino dedicado, ativa PULLUP
+
+  pinMode(BTN_ALARM_PIN, INPUT_PULLUP);
+#endif
+
+  // ---------- Inicialização do ESP RainMaker ----------
+
+  myNode = RMaker.initNode("ESP32-UFSC_Balduino");  
+
+  // === Device: Temperatura ===
+
+  devTemp = new Device("Temperatura","esp.device.temperature-sensor");
+  pTemp   = Param("Temperature","esp.param.temperature", value((float)0.0f), PROP_FLAG_READ);
+  pTemp.addUIType(ESP_RMAKER_UI_TEXT); 
+  devTemp->addParam(pTemp); 
+  devTemp->assignPrimaryParam(devTemp->getParamByName("Temperature"));
+  myNode.addDevice(*devTemp);
+
+  // === Device: Umidade ===
+
+  devHum  = new Device("Umidade","esp.device.humidity-sensor");
+  pHum    = Param("Humidity", ESP_RMAKER_PARAM_HUMIDITY, value((float)0.0f), PROP_FLAG_READ);
+  pHum.addUIType(ESP_RMAKER_UI_TEXT);
+  devHum->addParam(pHum); 
+  devHum->assignPrimaryParam(devHum->getParamByName("Humidity"));
+  myNode.addDevice(*devHum);
+
+  // --- Device: Umidade Alexa (espelho em temperature-sensor) ---
+
+  devHumAlexa = new Device("Umidade Alexa","esp.device.temperature-sensor");
+  pHumAlexaTemp = Param("Temperature","esp.param.temperature", value((float)0.0f), PROP_FLAG_READ);
+  pHumAlexaTemp.addUIType(ESP_RMAKER_UI_TEXT);
+  devHumAlexa->addParam(pHumAlexaTemp);
+  devHumAlexa->assignPrimaryParam(devHumAlexa->getParamByName("Temperature"));
+  myNode.addDevice(*devHumAlexa);
+
+  // === Device: Pressao ===
+
+  devPress = new Device("Pressao","esp.device.pressure-sensor");
+  pPress   = Param("Pressure","esp.param.pressure", value((float)0.0f), PROP_FLAG_READ);
+  pPress.addUIType(ESP_RMAKER_UI_TEXT);
+  devPress->addParam(pPress); 
+  devPress->assignPrimaryParam(devPress->getParamByName("Pressure"));
+  myNode.addDevice(*devPress);
+
+  // --- Device: Pressao Alexa (espelho em temperature-sensor) ---
+
+  devPressAlexa = new Device("Pressao Alexa","esp.device.temperature-sensor");
+  pPressAlexaTemp = Param("Temperature","esp.param.temperature", value((float)0.0f), PROP_FLAG_READ);
+  pPressAlexaTemp.addUIType(ESP_RMAKER_UI_TEXT);
+  devPressAlexa->addParam(pPressAlexaTemp);
+  devPressAlexa->assignPrimaryParam(devPressAlexa->getParamByName("Temperature"));
+  myNode.addDevice(*devPressAlexa);
+
+  // --- Device: MQ2 Alexa (espelho em temperature-sensor para delta%) ---
+
+  devMQ2Alexa = new Device("MQ2 Alexa","esp.device.temperature-sensor");
+  pMQ2AlexaTemp = Param("Temperature","esp.param.temperature", value((float)0.0f), PROP_FLAG_READ);
+  pMQ2AlexaTemp.addUIType(ESP_RMAKER_UI_TEXT);
+  devMQ2Alexa->addParam(pMQ2AlexaTemp);
+  devMQ2Alexa->assignPrimaryParam(devMQ2Alexa->getParamByName("Temperature"));
+  myNode.addDevice(*devMQ2Alexa);
+
+  // === Device: MQ2 (Estado / Enable / Active) ===
+
+  devMQ2 = new Device("MQ2","esp.device.switch");
+
+  // AlarmEnable: ativa/desativa disparo automático pelo estado de ALERTA
+
+  pAlarmEnable  = Param("AlarmEnable", ESP_RMAKER_PARAM_POWER, value(true),  (uint8_t)(PROP_FLAG_READ|PROP_FLAG_WRITE));
+
+  // AlarmActive: indica se o alarme está em nível de ALERTA ativo
+
+  pAlarmActive  = Param("AlarmActive","esp.param.custom",       value(false), PROP_FLAG_READ);
+
+  // Estado: string textual (OK / ATENCAO / ALERTA)
+
+  pEstadoStr    = Param("Estado",     "esp.param.custom",       value((const char*)"OK"), PROP_FLAG_READ);
+  devMQ2->addParam(pAlarmEnable); 
+  devMQ2->addParam(pAlarmActive); 
+  devMQ2->addParam(pEstadoStr);
+
+  // Callback para tratar escrita do parâmetro AlarmEnable (lado app/Alexa)
+
+  devMQ2->addCb([](Device* device, Param* param, param_val_t val, void*, write_ctx_t*){
+
+
+    // Verifica se o parâmetro modificado foi "AlarmEnable"
+
+
+    if (param->getParamHandle() == device->getParamByName("AlarmEnable")){
+      g_alarmEnable = val.val.b;  // atualiza flag local
+      param->updateAndReport(value((bool)g_alarmEnable));
+      return;
+    }
+    
+
+    param->updateAndReport(val);
+  });
+  myNode.addDevice(*devMQ2);
+
+  // === Device: Alarme (GPIO33) ===
+
+  devAlarm = new Device("Alarme","esp.device.lightbulb"); 
+  pAlarmSwitch = Param("Power", ESP_RMAKER_PARAM_POWER, value(false), (uint8_t)(PROP_FLAG_READ|PROP_FLAG_WRITE));
+  pAlarmSwitch.addUIType(ESP_RMAKER_UI_TOGGLE); 
+  devAlarm->addParam(pAlarmSwitch);
+  devAlarm->assignPrimaryParam(devAlarm->getParamByName("Power"));
+  devAlarm->addCb([](Device* device, Param* param, param_val_t val, void*, write_ctx_t*){
+    if (param->getParamHandle() == device->getParamByName("Power")){
+
+
+      // g_alarmForce = comando manual do app (ligar/desligar relé)
+
+      g_alarmForce = val.val.b;
+
+      // Relé liga se g_alarmForce OU g_alarmTrigger (manual OU auto)
+
+      alarmWrite(g_alarmForce || g_alarmTrigger);
+      param->updateAndReport(value((bool)g_alarmForce));
+      return;
+    }
+    param->updateAndReport(val);
+  });
+  myNode.addDevice(*devAlarm);
+
+  // === Device: Lampada (GPIO23) - botão ON/OFF ===
+
+  devLamp = new Device("Lampada","esp.device.lightbulb");
+  pLampSwitch = Param("Power", ESP_RMAKER_PARAM_POWER, value(false), (uint8_t)(PROP_FLAG_READ|PROP_FLAG_WRITE));
+  pLampSwitch.addUIType(ESP_RMAKER_UI_TOGGLE);
+  devLamp->addParam(pLampSwitch);
+  devLamp->assignPrimaryParam(devLamp->getParamByName("Power"));
+  devLamp->addCb([](Device* device, Param* param, param_val_t val, void*, write_ctx_t*){
+    if (param->getParamHandle() == device->getParamByName("Power")){
+      bool on = val.val.b;
+      lampWrite(on);
+      param->updateAndReport(value((bool)on));
+      return;
+    }
+    param->updateAndReport(val);
+  });
+  myNode.addDevice(*devLamp);
+
+  // Inicia stack do RainMaker
+
+  RMaker.start();
+
+  // --- Provisionamento BLE ---
+
+  // No app: Add Device -> BLE -> POP = "balduino2025"
+
+  char service_name[16]; 
+  uint8_t mac[6];
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
+  snprintf(service_name, sizeof(service_name), "PROV_%02X%02X%02X", mac[3], mac[4], mac[5]);
+  const char *pop = "balduino2025";
+  WiFiProv.beginProvision(
+    NETWORK_PROV_SCHEME_BLE,
+    NETWORK_PROV_SCHEME_HANDLER_FREE_BTDM,
+    NETWORK_PROV_SECURITY_1,
+    pop,
+    service_name
+  );
+
+  // -------- Publica um "sync" inicial para os tiles aparecerem com valores --------
+
+
+  float t0=dht.readTemperature(), h0=dht.readHumidity();
+  if(!isnan(t0)) 
+    pTemp.updateAndReport(value((float)t0));
+  if(!isnan(h0)){ 
+    pHum.updateAndReport(value((float)h0));
+    pHumAlexaTemp.updateAndReport(value((float)h0));
+  }
+  if(hasBMP){
+    float ppa=bmp.readPressure(); 
+    if(ppa>5000 && ppa<120000){
+      float ph=ppa/100.0f;
+      pPress.updateAndReport(value((float)ph));
+      pPressAlexaTemp.updateAndReport(value((float)ph));
+    }
+  }
+  // MQ2 Alexa inicial (por exemplo 0%)
+
+  pMQ2AlexaTemp.updateAndReport(value((float)0.0f));
+
+  // Estados iniciais de MQ2/Alarmes
+
+  pAlarmEnable.updateAndReport(value((bool)g_alarmEnable));
+  pAlarmActive.updateAndReport(value(false));
+  pEstadoStr.updateAndReport(value((const char*)g_estado));
+
+  // Switches iniciais da UI
+
+  pAlarmSwitch.updateAndReport(value((bool)g_alarmForce));
+  pLampSwitch.updateAndReport(value(false));
+
+  lcdMsg("Sistema pronto!","Mostrando leituras");
+  Serial.println("[BOOT] Setup concluido.");
+}
+
+// ---------------- LOOP PRINCIPAL ----------------
+
+
+void loop(){
+  static uint32_t last=0;
+
+  // Lê botão físico do alarme 
+
+  handleAlarmButton();
+
+  // A cada UI_PERIOD_MS, atualiza sensores, LCD e RainMaker
+
+  if (millis()-last >= UI_PERIOD_MS){
+    last = millis();
+    updateSensorsAndActuators();
+  }
+}
+
 
